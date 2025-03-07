@@ -60,12 +60,45 @@ list_servers() {
   local i=1
   for server_cmd in "${MCP_SERVERS[@]}"; do
     server_name=$(get_server_name "$server_cmd")
+    
+    # Try multiple approaches to find the process
     pid=$(pgrep -f "$server_cmd" | head -1)
     
+    # If not found, try with just the server name
+    if [ -z "$pid" ]; then
+      pid=$(pgrep -f "$server_name" | head -1)
+    fi
+    
+    # If it's the browser-tools-server, also check port 3025
+    if [ -z "$pid" ] && [[ "$server_name" == "browser-tools-server" ]] && command -v lsof >/dev/null 2>&1; then
+      pid=$(lsof -t -i :3025 | head -1)
+    fi
+    
+    # Try with package name if available
+    if [ -z "$pid" ] && [[ "$server_cmd" =~ @([^/]+)/([^[:space:]]+) ]]; then
+      pkg_name="${BASH_REMATCH[2]}"
+      pid=$(pgrep -f "$pkg_name" | head -1)
+    fi
+    
     if [ -n "$pid" ]; then
-      echo "[$i] $server_name (PID: $pid)"
+      # Try to get more info about the process
+      if command -v ps >/dev/null 2>&1; then
+        cmd=$(ps -p $pid -o command= 2>/dev/null | head -1)
+        truncated_cmd="${cmd:0:50}"
+        if [ ${#cmd} -gt 50 ]; then
+          truncated_cmd="${truncated_cmd}..."
+        fi
+        echo "[$i] $server_name (PID: $pid, Command: $truncated_cmd)"
+      else
+        echo "[$i] $server_name (PID: $pid)"
+      fi
     else
-      echo "[$i] $server_name (not running)"
+      # Special case for browser-tools-server - check port directly
+      if [[ "$server_name" == "browser-tools-server" ]] && command -v lsof >/dev/null 2>&1 && lsof -i :3025 >/dev/null 2>&1; then
+        echo "[$i] $server_name (running on port 3025)"
+      else
+        echo "[$i] $server_name (not running)"
+      fi
     fi
     i=$((i+1))
   done
@@ -76,18 +109,100 @@ list_servers() {
 stop_servers() {
   if [ -z "$1" ]; then
     echo "Stopping all MCP servers..."
+    
+    # First try the standard approach
     for server_cmd in "${MCP_SERVERS[@]}"; do
+      server_name=$(get_server_name "$server_cmd")
+      echo "Attempting to stop $server_name..."
       pkill -f "$server_cmd"
     done
-    echo "All MCP servers stopped."
+    
+    # Check if browser-tools-server is still running by checking port 3025
+    if command -v lsof >/dev/null 2>&1; then
+      echo "Checking for processes on port 3025..."
+      browser_pids=$(lsof -t -i :3025 2>/dev/null)
+      if [ -n "$browser_pids" ]; then
+        echo "Found browser-tools-server processes still running on port 3025. Killing them..."
+        kill $browser_pids 2>/dev/null || kill -9 $browser_pids 2>/dev/null
+      fi
+    fi
+    
+    # More aggressive approach for any remaining processes
+    for server_cmd in "${MCP_SERVERS[@]}"; do
+      server_name=$(get_server_name "$server_cmd")
+      remaining_pids=$(pgrep -f "$server_name" 2>/dev/null)
+      if [ -n "$remaining_pids" ]; then
+        echo "Found remaining $server_name processes. Killing them forcefully..."
+        kill -9 $remaining_pids 2>/dev/null
+      fi
+      
+      # Also try with partial command match
+      if [[ "$server_cmd" =~ @([^/]+)/([^[:space:]]+) ]]; then
+        pkg_name="${BASH_REMATCH[2]}"
+        remaining_pids=$(pgrep -f "$pkg_name" 2>/dev/null)
+        if [ -n "$remaining_pids" ]; then
+          echo "Found remaining processes matching $pkg_name. Killing them forcefully..."
+          kill -9 $remaining_pids 2>/dev/null
+        fi
+      fi
+    done
+    
+    # Final verification
+    sleep 1
+    still_running=false
+    for server_cmd in "${MCP_SERVERS[@]}"; do
+      server_name=$(get_server_name "$server_cmd")
+      if pgrep -f "$server_cmd" >/dev/null 2>&1 || pgrep -f "$server_name" >/dev/null 2>&1; then
+        echo "Warning: $server_name might still be running."
+        still_running=true
+      fi
+    done
+    
+    # Check port 3025 one more time
+    if command -v lsof >/dev/null 2>&1 && lsof -i :3025 >/dev/null 2>&1; then
+      echo "Warning: Port 3025 is still in use. Some MCP server might still be running."
+      still_running=true
+    fi
+    
+    if [ "$still_running" = true ]; then
+      echo "Some servers might still be running. You may need to close their Terminal tabs manually."
+    else
+      echo "All MCP servers stopped successfully."
+    fi
   else
     if [[ "$1" =~ ^[0-9]+$ ]] && [ "$1" -le "${#MCP_SERVERS[@]}" ]; then
       index=$((10#$1 - 1))
       server_cmd="${MCP_SERVERS[$index]}"
       server_name=$(get_server_name "$server_cmd")
       echo "Stopping $server_name..."
+      
+      # Try standard approach first
       pkill -f "$server_cmd"
-      echo "$server_name stopped."
+      
+      # If it's the browser-tools-server, also check port 3025
+      if [[ "$server_name" == "browser-tools-server" ]] && command -v lsof >/dev/null 2>&1; then
+        browser_pids=$(lsof -t -i :3025 2>/dev/null)
+        if [ -n "$browser_pids" ]; then
+          echo "Found browser-tools-server processes still running on port 3025. Killing them..."
+          kill $browser_pids 2>/dev/null || kill -9 $browser_pids 2>/dev/null
+        fi
+      fi
+      
+      # More aggressive approach
+      remaining_pids=$(pgrep -f "$server_name" 2>/dev/null)
+      if [ -n "$remaining_pids" ]; then
+        echo "Found remaining $server_name processes. Killing them forcefully..."
+        kill -9 $remaining_pids 2>/dev/null
+      fi
+      
+      # Final verification
+      sleep 1
+      if pgrep -f "$server_cmd" >/dev/null 2>&1 || pgrep -f "$server_name" >/dev/null 2>&1 || 
+         ([[ "$server_name" == "browser-tools-server" ]] && command -v lsof >/dev/null 2>&1 && lsof -i :3025 >/dev/null 2>&1); then
+        echo "Warning: $server_name might still be running. You may need to close its Terminal tab manually."
+      else
+        echo "$server_name stopped successfully."
+      fi
     else
       echo "Error: Invalid server number. Use 'list' to see available servers."
       exit 1
@@ -133,7 +248,8 @@ show_logs() {
   if [ -z "$1" ]; then
     echo "Available log files:"
     echo "------------------"
-    ls -1 *.log 2>/dev/null
+    # Use find to list log files more reliably
+    find . -maxdepth 1 -name "*.log" -type f | sort | sed 's|^\./||'
     echo ""
     echo "Use 'logs [n]' to view a specific log file."
   else

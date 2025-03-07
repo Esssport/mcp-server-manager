@@ -88,7 +88,8 @@ if [ "$BACKGROUND_MODE" = false ]; then
     tmp_cmds=$(mktemp)
     for server_cmd in "${MCP_SERVERS[@]}"; do
       server_name=$(get_server_name "$server_cmd")
-      echo "echo 'Starting $server_name...' && $server_cmd" >> "$tmp_cmds"
+      # Create a command that also logs to a file
+      echo "echo 'Starting $server_name...' && ($server_cmd 2>&1 | tee '$server_name.log')" >> "$tmp_cmds"
     done
     
     # Run all commands in parallel with output prefixed by server name
@@ -105,8 +106,8 @@ if [ "$BACKGROUND_MODE" = false ]; then
       pipe="$pipes_dir/$server_name"
       mkfifo "$pipe"
       
-      # Start each server with output redirected to the pipe
-      (echo "Starting $server_name..." && $server_cmd 2>&1 || echo "$server_name exited with error") > "$pipe" &
+      # Start each server with output redirected to the pipe and also to a log file
+      (echo "Starting $server_name..." && ($server_cmd 2>&1 | tee "$server_name.log") || echo "$server_name exited with error") > "$pipe" &
       
       # Read from the pipe and prefix each line with the server name
       sed "s/^/[$server_name] /" < "$pipe" &
@@ -129,12 +130,21 @@ if [[ "$OSTYPE" == "darwin"* ]]; then
     # Start each server in a new tab
     for server_cmd in "${MCP_SERVERS[@]}"; do
       server_name=$(get_server_name "$server_cmd")
+      # Create a wrapper script that will run the command and log output
+      wrapper_script=$(mktemp)
+      cat > "$wrapper_script" << WRAPPER
+#!/bin/bash
+echo "Starting $server_name..."
+$server_cmd 2>&1 | tee "$(pwd)/$server_name.log"
+WRAPPER
+      chmod +x "$wrapper_script"
+      
       osascript <<EOF
       tell application "iTerm"
         tell current window
           create tab with default profile
           tell current session
-            write text "echo 'Starting $server_name...' && $server_cmd"
+            write text "bash '$wrapper_script'; rm '$wrapper_script'"
           end tell
         end tell
       end tell
@@ -148,9 +158,18 @@ EOF
     # Start each server in a new window
     for server_cmd in "${MCP_SERVERS[@]}"; do
       server_name=$(get_server_name "$server_cmd")
+      # Create a wrapper script that will run the command and log output
+      wrapper_script=$(mktemp)
+      cat > "$wrapper_script" << WRAPPER
+#!/bin/bash
+echo "Starting $server_name..."
+$server_cmd 2>&1 | tee "$(pwd)/$server_name.log"
+WRAPPER
+      chmod +x "$wrapper_script"
+      
       osascript <<EOF
       tell application "Terminal"
-        do script "echo 'Starting $server_name...' && $server_cmd"
+        do script "bash '$wrapper_script'; rm '$wrapper_script'"
       end tell
 EOF
     done
@@ -169,7 +188,16 @@ EOF
       window_index=1
       for server_cmd in "${MCP_SERVERS[@]}"; do
         server_name=$(get_server_name "$server_cmd")
-        tmux new-window -t mcp:$window_index -n "$server_name" "echo 'Starting $server_name...' && $server_cmd"
+        # Create a wrapper script that will run the command and log output
+        wrapper_script=$(mktemp)
+        cat > "$wrapper_script" << WRAPPER
+#!/bin/bash
+echo "Starting $server_name..."
+$server_cmd 2>&1 | tee "$(pwd)/$server_name.log"
+WRAPPER
+        chmod +x "$wrapper_script"
+        
+        tmux new-window -t mcp:$window_index -n "$server_name" "bash '$wrapper_script'; rm '$wrapper_script'"
         window_index=$((window_index + 1))
       done
       
@@ -197,7 +225,16 @@ else
     echo "Starting servers in gnome-terminal tabs..."
     for server_cmd in "${MCP_SERVERS[@]}"; do
       server_name=$(get_server_name "$server_cmd")
-      gnome-terminal -- bash -c "echo 'Starting $server_name...' && $server_cmd; bash"
+      # Create a wrapper script that will run the command and log output
+      wrapper_script=$(mktemp)
+      cat > "$wrapper_script" << WRAPPER
+#!/bin/bash
+echo "Starting $server_name..."
+$server_cmd 2>&1 | tee "$(pwd)/$server_name.log"
+WRAPPER
+      chmod +x "$wrapper_script"
+      
+      gnome-terminal -- bash -c "bash '$wrapper_script'; rm '$wrapper_script'; bash"
     done
   else
     # Simple fallback - start in background with output to files
