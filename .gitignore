@@ -1,5 +1,11 @@
 # MCP Server Management Scripts .gitignore
 
+# Environment variables and secrets
+.env
+.env.*
+!.env.example
+
+
 # Log files
 *.log
 
